@@ -1,4 +1,5 @@
 ﻿using System.IO.Pipes;
+using Tunetastic.Common.Operations;
 using WinUIEx;
 
 namespace Tunetastic;
@@ -183,13 +184,20 @@ public partial class App : Application
 			{
 				try
 				{
-					using var server = new NamedPipeServerStream("Tunetastic.InstancePing", PipeDirection.In);
+					using var server = new NamedPipeServerStream("Tunetastic.InstancePing", PipeDirection.InOut);
 					await server.WaitForConnectionAsync().ConfigureAwait(false);
 
 					using var reader = new StreamReader(server);
+					using var writer = new StreamWriter(server) { AutoFlush = true };
 					var message = await reader.ReadLineAsync().ConfigureAwait(false);
 
-					if (message == "PING" && MainWindow is not null)
+					if (message != null && message.StartsWith("CLI:"))
+					{
+						var cliArgs = message.Substring(4).Split(new[] { "|||" }, StringSplitOptions.None);
+						await CliHandler.ExecuteCliAsync(cliArgs, writer);
+						writer.WriteLine("END_CLI");
+					}
+					else if (message == "PING" && MainWindow is not null)
 					{
 						MainWindow.DispatcherQueue.TryEnqueue(() =>
 						{

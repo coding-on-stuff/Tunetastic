@@ -1,4 +1,5 @@
 ﻿using System.IO.Pipes;
+using Tunetastic.Common.Operations;
 
 namespace Tunetastic;
 
@@ -14,12 +15,17 @@ public static class Startup
 	/// <remarks>
 	/// Uses a mutex to prevent multiple instances from running simultaneously.
 	/// If an existing instance is detected, it attempts to communicate with it via a named pipe
-	/// by sending a PING message before terminating the current instance.
-	/// If no existing instance is found, it proceeds to start a new application instance.
+	/// by sending a PING or CLI message before terminating the current instance.
+	/// If no existing instance is found, it proceeds to execute CLI logic or start a new application instance.
 	/// </remarks>
 	[STAThread]
 	static void Main(string[] args)
 	{
+		if (CliHandler.IsCliCommand(args))
+		{
+			CliHandler.AttachParentConsole();
+		}
+
 		bool createdNew;
 		using var mutex = new Mutex(true, "Tunetastic.Mutex", out createdNew);
 
@@ -27,15 +33,39 @@ public static class Startup
 		{
 			try
 			{
-				using var client = new NamedPipeClientStream(".", "Tunetastic.InstancePing", PipeDirection.Out);
-				client.Connect(200);
+				using var client = new NamedPipeClientStream(".", "Tunetastic.InstancePing", PipeDirection.InOut);
+				client.Connect(1000);
 				using var writer = new StreamWriter(client) { AutoFlush = true };
-				writer.WriteLine("PING");
+				using var reader = new StreamReader(client);
+
+				if (CliHandler.IsCliCommand(args))
+				{
+					writer.WriteLine("CLI:" + string.Join("|||", args));
+					string? line;
+					while ((line = reader.ReadLine()) != null)
+					{
+						if (line == "END_CLI") break;
+						Console.WriteLine(line);
+					}
+				}
+				else
+				{
+					writer.WriteLine("PING");
+				}
 			}
 			catch
 			{
 				//ignore
 			}
+			return;
+		}
+
+		if (CliHandler.IsCliCommand(args))
+		{
+			Task.Run(async () =>
+			{
+				await CliHandler.ExecuteCliAsync(args);
+			}).GetAwaiter().GetResult();
 			return;
 		}
 

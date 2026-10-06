@@ -194,7 +194,15 @@ public partial class App : Application
 					if (message != null && message.StartsWith("CLI:"))
 					{
 						var jsonPayload = message.Substring(4);
-						var cliArgs = System.Text.Json.JsonSerializer.Deserialize<string[]>(jsonPayload) ?? Array.Empty<string>();
+						string[] cliArgs;
+						try
+						{
+							cliArgs = System.Text.Json.JsonSerializer.Deserialize<string[]>(jsonPayload) ?? Array.Empty<string>();
+						}
+						catch
+						{
+							cliArgs = Array.Empty<string>();
+						}
 						await CliHandler.ExecuteCliAsync(cliArgs, writer);
 						writer.WriteLine("END_CLI");
 					}

@@ -7,32 +7,41 @@ namespace Tunetastic.Common.Operations;
 /// </summary>
 public static class CliHandlerTests
 {
-	public static async Task RunTestsAsync()
+	public static async Task RunTestsAsync(TextWriter? writer = null)
 	{
-		TestIsCliCommand();
-		await TestHelpUsageOutputAsync();
-		TestJsonIpcSerialization();
-		TestFileResolver();
+		writer ??= Console.Out;
+		writer.WriteLine("Running Tunetastic CLI Unit Tests...");
+
+		TestIsCliCommand(writer);
+		await TestHelpUsageOutputAsync(writer);
+		TestJsonIpcSerialization(writer);
+		TestFileResolver(writer);
+
+		writer.WriteLine("All CLI Unit Tests Passed Successfully!");
 	}
 
-	private static void TestIsCliCommand()
+	private static void TestIsCliCommand(TextWriter writer)
 	{
 		Assert(CliHandler.IsCliCommand(new[] { "playlist", "add", "Test", "file.mp3" }));
 		Assert(CliHandler.IsCliCommand(new[] { "--help" }));
 		Assert(CliHandler.IsCliCommand(new[] { "-h" }));
 		Assert(CliHandler.IsCliCommand(new[] { "help" }));
 		Assert(CliHandler.IsCliCommand(new[] { "/?" }));
+		Assert(CliHandler.IsCliCommand(new[] { "test" }));
+		Assert(CliHandler.IsCliCommand(new[] { "--run-tests" }));
 
 		Assert(!CliHandler.IsCliCommand(null));
 		Assert(!CliHandler.IsCliCommand(Array.Empty<string>()));
 		Assert(!CliHandler.IsCliCommand(new[] { "randomArg" }));
+
+		writer.WriteLine("  [PASS] TestIsCliCommand");
 	}
 
-	private static async Task TestHelpUsageOutputAsync()
+	private static async Task TestHelpUsageOutputAsync(TextWriter writer)
 	{
-		using var writer = new StringWriter();
-		await CliHandler.ExecuteCliAsync(new[] { "--help" }, writer);
-		string output = writer.ToString();
+		using var strWriter = new StringWriter();
+		await CliHandler.ExecuteCliAsync(new[] { "--help" }, strWriter);
+		string output = strWriter.ToString();
 		Assert(output.Contains("Tunetastic CLI - Add local music to playlist"));
 		Assert(output.Contains("Usage:"));
 
@@ -40,9 +49,11 @@ public static class CliHandlerTests
 		await CliHandler.ExecuteCliAsync(new[] { "playlist", "invalid" }, errorWriter);
 		string errorOutput = errorWriter.ToString();
 		Assert(errorOutput.Contains("Error: Invalid command arguments"));
+
+		writer.WriteLine("  [PASS] TestHelpUsageOutputAsync");
 	}
 
-	private static void TestJsonIpcSerialization()
+	private static void TestJsonIpcSerialization(TextWriter writer)
 	{
 		string[] originalArgs = new[] { "playlist", "add", "My | Special \"Playlist\"", "C:\\Music\\song | 1.mp3" };
 		string serialized = JsonSerializer.Serialize(originalArgs);
@@ -54,29 +65,44 @@ public static class CliHandlerTests
 		Assert(deserialized[1] == "add");
 		Assert(deserialized[2] == "My | Special \"Playlist\"");
 		Assert(deserialized[3] == "C:\\Music\\song | 1.mp3");
+
+		writer.WriteLine("  [PASS] TestJsonIpcSerialization");
 	}
 
-	private static void TestFileResolver()
+	private static void TestFileResolver(TextWriter writer)
 	{
 		// Non-existent path test
-		using var writer = new StringWriter();
-		var result = CliHandler.ResolveFiles("non_existent_path_12345.mp3", null, writer);
+		using var strWriter = new StringWriter();
+		var result = CliHandler.ResolveFiles("non_existent_path_12345.mp3", null, strWriter);
 		Assert(result.Count == 0);
-		Assert(writer.ToString().Contains("Specified file or folder path does not exist"));
+		Assert(strWriter.ToString().Contains("Specified file or folder path does not exist"));
 
-		// Existing temp file test
-		string tempFile = Path.Combine(Path.GetTempPath(), "test_tunetastic_sample.mp3");
-		File.WriteAllText(tempFile, "dummy");
+		// Existing non-audio file test (should be rejected)
+		string tempTxtFile = Path.Combine(Path.GetTempPath(), "test_file.txt");
+		File.WriteAllText(tempTxtFile, "text content");
+
+		// Existing valid temp audio file test
+		string tempMp3File = Path.Combine(Path.GetTempPath(), "test_tunetastic_sample.mp3");
+		File.WriteAllText(tempMp3File, "dummy mp3");
+
 		try
 		{
-			var fileResult = CliHandler.ResolveFiles(tempFile, null, null);
-			Assert(fileResult.Count == 1);
-			Assert(Path.GetFullPath(tempFile).Equals(fileResult[0], StringComparison.OrdinalIgnoreCase));
+			using var txtLogWriter = new StringWriter();
+			var txtResult = CliHandler.ResolveFiles(tempTxtFile, null, txtLogWriter);
+			Assert(txtResult.Count == 0, "Non-audio text file should be rejected by resolver");
+			Assert(txtLogWriter.ToString().Contains("is not a supported audio format"));
+
+			var mp3Result = CliHandler.ResolveFiles(tempMp3File, null, null);
+			Assert(mp3Result.Count == 1, "Valid audio file should be accepted by resolver");
+			Assert(Path.GetFullPath(tempMp3File).Equals(mp3Result[0], StringComparison.OrdinalIgnoreCase));
 		}
 		finally
 		{
-			if (File.Exists(tempFile)) File.Delete(tempFile);
+			if (File.Exists(tempTxtFile)) File.Delete(tempTxtFile);
+			if (File.Exists(tempMp3File)) File.Delete(tempMp3File);
 		}
+
+		writer.WriteLine("  [PASS] TestFileResolver");
 	}
 
 	private static void Assert(bool condition, string? message = null)

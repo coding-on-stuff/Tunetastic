@@ -43,7 +43,7 @@ public static class CliHandler
 		if (args == null || args.Length == 0) return false;
 
 		string first = args[0].Trim().ToLowerInvariant();
-		return first == "playlist" || first == "--help" || first == "-h" || first == "/?" || first == "help";
+		return first == "playlist" || first == "--help" || first == "-h" || first == "/?" || first == "help" || first == "test" || first == "--run-tests";
 	}
 
 	/// <summary>
@@ -56,6 +56,12 @@ public static class CliHandler
 		if (args == null || args.Length == 0 || IsHelpRequest(args))
 		{
 			PrintUsage(writer);
+			return;
+		}
+
+		if (args.Length > 0 && (string.Equals(args[0], "test", StringComparison.OrdinalIgnoreCase) || string.Equals(args[0], "--run-tests", StringComparison.OrdinalIgnoreCase)))
+		{
+			await CliHandlerTests.RunTestsAsync(writer);
 			return;
 		}
 
@@ -91,19 +97,24 @@ public static class CliHandler
 		writer.WriteLine();
 		writer.WriteLine("Usage:");
 		writer.WriteLine("  tunetastic playlist add \"<playlist_name>\" \"<file_or_folder_or_glob>\"");
+		writer.WriteLine("  tunetastic test");
 		writer.WriteLine();
 		writer.WriteLine("Examples:");
 		writer.WriteLine("  tunetastic playlist add \"My Playlist\" \"C:\\Music\\song.mp3\"");
 		writer.WriteLine("  tunetastic playlist add \"My Playlist\" \"C:\\Music\\*.mp3\"");
+		writer.WriteLine("  tunetastic playlist add \"My Playlist\" \"C:\\Music\\**\\*.mp3\"");
 		writer.WriteLine("  tunetastic playlist add \"My Playlist\" \"C:\\Music\\Album\"");
 		writer.WriteLine();
 		writer.WriteLine("Notes:");
 		writer.WriteLine("  - Folder paths are scanned recursively for all supported audio formats.");
-		writer.WriteLine("  - Wildcard patterns (e.g. *.mp3) match files in the specified folder.");
+		writer.WriteLine("  - Single wildcard patterns (e.g. C:\\Music\\*.mp3) match files in that specific folder.");
+		writer.WriteLine("  - Recursive wildcard patterns (e.g. C:\\Music\\**\\*.mp3) match files across subfolders.");
+		writer.WriteLine("  - Direct file paths must be a supported audio format.");
 		writer.WriteLine("  - Tracks already in the target playlist are skipped automatically.");
 		writer.WriteLine();
 		writer.WriteLine("Options:");
 		writer.WriteLine("  --help, -h    Display this help message.");
+		writer.WriteLine("  test          Execute internal CLI unit tests.");
 	}
 
 	public static readonly HashSet<string> DefaultAudioExtensions = new(StringComparer.OrdinalIgnoreCase)
@@ -290,7 +301,15 @@ public static class CliHandler
 		// Case 1: Direct file
 		if (File.Exists(targetPath))
 		{
-			result.Add(Path.GetFullPath(targetPath));
+			string ext = Path.GetExtension(targetPath);
+			if (audioExtensions.Contains(ext))
+			{
+				result.Add(Path.GetFullPath(targetPath));
+			}
+			else
+			{
+				writer?.WriteLine($"File '{targetPath}' is not a supported audio format ({ext}).");
+			}
 			return result;
 		}
 

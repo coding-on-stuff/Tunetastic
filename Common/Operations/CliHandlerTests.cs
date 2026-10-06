@@ -16,6 +16,7 @@ public static class CliHandlerTests
 		await TestHelpUsageOutputAsync(writer);
 		TestJsonIpcSerialization(writer);
 		TestFileResolver(writer);
+		TestWildcardGlobResolver(writer);
 
 		writer.WriteLine("All CLI Unit Tests Passed Successfully!");
 	}
@@ -40,13 +41,15 @@ public static class CliHandlerTests
 	private static async Task TestHelpUsageOutputAsync(TextWriter writer)
 	{
 		using var strWriter = new StringWriter();
-		await CliHandler.ExecuteCliAsync(new[] { "--help" }, strWriter);
+		int exitCode = await CliHandler.ExecuteCliAsync(new[] { "--help" }, strWriter);
+		Assert(exitCode == CliHandler.EXIT_SUCCESS, "Help request should return EXIT_SUCCESS");
 		string output = strWriter.ToString();
 		Assert(output.Contains("Tunetastic CLI - Add local music to playlist"));
 		Assert(output.Contains("Usage:"));
 
 		using var errorWriter = new StringWriter();
-		await CliHandler.ExecuteCliAsync(new[] { "playlist", "invalid" }, errorWriter);
+		int errorExitCode = await CliHandler.ExecuteCliAsync(new[] { "playlist", "invalid" }, errorWriter);
+		Assert(errorExitCode == CliHandler.EXIT_INVALID_ARGS, "Invalid args should return EXIT_INVALID_ARGS");
 		string errorOutput = errorWriter.ToString();
 		Assert(errorOutput.Contains("Error: Invalid command arguments"));
 
@@ -103,6 +106,42 @@ public static class CliHandlerTests
 		}
 
 		writer.WriteLine("  [PASS] TestFileResolver");
+	}
+
+	private static void TestWildcardGlobResolver(TextWriter writer)
+	{
+		string tempDir = Path.Combine(Path.GetTempPath(), "TunetasticTestGlob_" + Guid.NewGuid().ToString("N"));
+		string subDir = Path.Combine(tempDir, "SubFolder");
+		Directory.CreateDirectory(subDir);
+
+		string rootFile = Path.Combine(tempDir, "root_song.mp3");
+		string subFile = Path.Combine(subDir, "sub_song.mp3");
+
+		File.WriteAllText(rootFile, "dummy");
+		File.WriteAllText(subFile, "dummy");
+
+		try
+		{
+			// Test single folder wildcard (non-recursive)
+			string singlePattern = Path.Combine(tempDir, "*.mp3");
+			var singleResult = CliHandler.ResolveFiles(singlePattern, null, null);
+			Assert(singleResult.Count == 1, $"Single wildcard should find 1 file in top folder, got {singleResult.Count}");
+			Assert(singleResult[0].Equals(Path.GetFullPath(rootFile), StringComparison.OrdinalIgnoreCase));
+
+			// Test recursive wildcard (**/*.mp3)
+			string recursivePattern = Path.Combine(tempDir, "**", "*.mp3");
+			var recursiveResult = CliHandler.ResolveFiles(recursivePattern, null, null);
+			Assert(recursiveResult.Count == 2, $"Recursive wildcard should find 2 files across subfolders, got {recursiveResult.Count}");
+		}
+		finally
+		{
+			if (Directory.Exists(tempDir))
+			{
+				Directory.Delete(tempDir, true);
+			}
+		}
+
+		writer.WriteLine("  [PASS] TestWildcardGlobResolver");
 	}
 
 	private static void Assert(bool condition, string? message = null)

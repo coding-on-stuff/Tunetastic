@@ -1,4 +1,4 @@
-﻿using System.Collections.Concurrent;
+using System.Collections.Concurrent;
 using FlyleafLib;
 using FlyleafLib.MediaPlayer;
 
@@ -15,34 +15,16 @@ public class LibraryScanner
 	/// <summary>
 	/// Indicates whether a music library scan is currently in progress.
 	/// </summary>
-	/// <remarks>
-	/// This property returns a boolean value to check the scanning state of the music library.
-	/// Useful for preventing overlapping scan operations or triggering UI updates based
-	/// on the scanning state.
-	/// </remarks>
 	public static bool IsScanning => _isScanning;
 
 	/// <summary>
 	/// Represents the progress of the library scanning operation as a percentage.
 	/// </summary>
-	/// <remarks>
-	/// This property indicates the current state of the scan process, ranging from 0 to 100,
-	/// where 0 represents the beginning and 100 signifies completion. It is updated dynamically
-	/// during the scanning of music libraries and can be used to provide feedback to the user
-	/// about the scan's progress.
-	/// </remarks>
 	public static double ScanProgress { get; private set; } = 0;
 
 	/// <summary>
 	/// Performs an asynchronous metadata update operation on the music libraries stored in the system.
-	/// Ensures that simultaneous scanning operations are avoided and updates the global notifications
-	/// based on the outcome of the scanning process.
 	/// </summary>
-	/// <returns>
-	/// A <see cref="Task"/> that represents the asynchronous operation of updating metadata.
-	/// The operation updates notification messages such as "Info," "Warning," or "Error" and resets
-	/// the music player state upon completion.
-	/// </returns>
 	public async Task UpdateMetaData()
 	{
 		if (IsScanning) return;
@@ -82,15 +64,6 @@ public class LibraryScanner
 		TaskbarHelper.SetProgressState(App.Hwnd, TaskbarStates.NoProgress);
 	}
 
-	/// <summary>
-	/// Scans the music libraries to identify and process audio files, applying filters such as
-	/// file format and optional configurations for ignoring duplicates or tracks below a certain duration.
-	/// Updates the local settings and notifies the user with the scan results.
-	/// Processes files in parallel (DOP=4) to fully utilize multi-core CPUs and SSDs.
-	/// </summary>
-	/// <returns>
-	/// A <see cref="Task"/> that represents the asynchronous operation of scanning the music libraries.
-	/// </returns>
 	private async Task<(string, string, List<string>)> ScanLibraries()
 	{
 		TaskbarHelper.SetProgressState(App.Hwnd, TaskbarStates.Normal);
@@ -121,7 +94,7 @@ public class LibraryScanner
 		{
 			var uniqueFolders = ComputeEffectiveRoots(libraries);
 
-			var options = new EnumerationOptions { RecurseSubdirectories = true };
+			var options = new EnumerationOptions { RecurseSubdirectories = true, IgnoreInaccessible = true };
 
 			foreach (var folder in uniqueFolders)
 			{
@@ -135,11 +108,8 @@ public class LibraryScanner
 				}
 			}
 
-			// Thread-safe collections for parallel processing
 			var songsContainer = new ConcurrentBag<Song>();
 			var scanMetaContainer = new ConcurrentBag<FileScanMeta>();
-
-			// ConcurrentDictionary used as a concurrent HashSet for duplicate detection
 			var uniqueMetadata = new ConcurrentDictionary<(string Title, string Artist, string Album), byte>();
 
 			ScanProgress = 1;
@@ -147,23 +117,17 @@ public class LibraryScanner
 			int processedFiles = 0;
 			int totalFiles = audioFiles.Count;
 
-			// Detect the storage type of the first library's drive and pick an
-			// appropriate DOP. HDD must stay sequential (DOP=1) to avoid thrashing;
-			// SATA SSD can saturate its queue at DOP=4; NVMe benefits from DOP=8.
 			string probePath = uniqueFolders.Count > 0 ? uniqueFolders[0] : audioFiles.First();
 			DiskKind diskKind = DiskSpeedDetector.GetDiskKind(probePath);
 			int dop = DiskSpeedDetector.DopForKind(diskKind);
 
 			var failedFiles = new ConcurrentBag<string>();
-			// Parallel.ForEachAsync: DOP is chosen per detected storage type.
-			// Each file is independent — no shared mutable state except the
-			// thread-safe collections above.
 			await Parallel.ForEachAsync(
 				audioFiles,
 				new ParallelOptions { MaxDegreeOfParallelism = dop },
 				async (filePath, ct) =>
 				{
-					var (song, succeeded) = await ExtractSongMetadata(filePath, ignoreTrackDuration);
+					var (song, succeeded, _, _, _) = await ExtractSongMetadata(filePath, ignoreTrackDuration);
 
 					if (!succeeded)
 					{
@@ -176,8 +140,6 @@ public class LibraryScanner
 						scanMetaContainer.Add(BuildFileScanMeta(filePath));
 					}
 
-					// Atomically increment counter; update taskbar every 10 files to
-					// avoid hammering the UI thread from 4 concurrent workers.
 					int current = Interlocked.Increment(ref processedFiles);
 					if (current % 10 == 0 || current == totalFiles)
 					{
@@ -226,28 +188,25 @@ public class LibraryScanner
 	}
 
 	/// <summary>
-	/// Extracts song metadata from an audio file using TagLib, falling back to the Flyleaf player when the
-	/// duration cannot be read from tags and building a partial song from file-system data when reading fails.
+	/// Extracts song metadata from an audio file using TagLib, returning song details along with extra tag info.
 	/// </summary>
-	/// <remarks>
-	/// When TagLib reports a duration of zero or less, a temporary Flyleaf <c>Player</c> probes the real
-	/// duration and the player type is forced to "Flyleaf". When TagLib throws, a fallback song is built from
-	/// the file name with "Unknown" placeholders.
-	/// </remarks>
-	/// <param name="filePath">The full path to the audio file to read.</param>
-	/// <param name="ignoreTrackDuration">
-	/// Tracks of this duration or shorter (in seconds) are filtered out by the caller.
-	/// </param>
-	/// <returns>
-	/// A task that represents the asynchronous operation. The task result contains the extracted
-	/// <see cref="Song"/> and a flag telling whether the metadata was read successfully.
-	/// </returns>
-	internal static async Task<(Song song, bool succeeded)> ExtractSongMetadata(string filePath, double ignoreTrackDuration)
+	internal static async Task<(Song song, bool succeeded, int discNumber, string[]? composers, bool hasPictures)> ExtractSongMetadata(string filePath, double ignoreTrackDuration)
 	{
+		int discNumber = 0;
+		string[]? composers = null;
+		bool hasPictures = false;
+
 		try
 		{
 			using var audioModel = TagLib.File.Create(filePath);
 			var fileInfo = new FileInfo(filePath);
+
+			if (audioModel.Tag != null)
+			{
+				discNumber = (int)audioModel.Tag.Disc;
+				composers = audioModel.Tag.Composers;
+				hasPictures = audioModel.Tag.Pictures?.Length > 0;
+			}
 
 			var song = new Song
 			{
@@ -314,7 +273,7 @@ public class LibraryScanner
 				song.PlayerType = "Flyleaf";
 			}
 
-			return (song, true);
+			return (song, true, discNumber, composers, hasPictures);
 		}
 		catch (Exception)
 		{
@@ -348,24 +307,10 @@ public class LibraryScanner
 				DateAdded = fileInfo.LastWriteTime,
 				Extension = fileInfo.Extension
 			};
-			return (song, false);
+			return (song, false, 0, null, false);
 		}
 	}
 
-	/// <summary>
-	/// Captures the file system state of the file at <paramref name="filePath"/> as a
-	/// <see cref="FileScanMeta"/> row, so later incremental passes can detect created, modified, renamed and
-	/// deleted files without re-reading their tags.
-	/// </summary>
-	/// <remarks>
-	/// Compared against the current disk state by <see cref="RenameDetector.DetectRenamesAndMoves"/>. All
-	/// timestamps are UTC ticks, which keeps the comparison valid across time zones and daylight-saving changes.
-	/// </remarks>
-	/// <param name="filePath">The full path of the file to snapshot.</param>
-	/// <returns>
-	/// A <see cref="FileScanMeta"/> holding the path, last write time, creation time, size in bytes and the
-	/// current UTC time.
-	/// </returns>
 	internal static FileScanMeta BuildFileScanMeta(string filePath)
 	{
 		var fileInfo = new FileInfo(filePath);
@@ -379,16 +324,6 @@ public class LibraryScanner
 		};
 	}
 
-	/// <summary>
-	/// Reduces the configured library paths to the smallest set of root folders that still covers all of them,
-	/// dropping every library that is itself a library or lives inside one already accepted.
-	/// </summary>
-	/// <remarks>
-	/// Paths are sorted by length first, so a parent folder is always evaluated before its children. Library
-	/// folders that no longer exist are reported through <see cref="GlobalNotification"/> and left out.
-	/// </remarks>
-	/// <param name="libraries">The library root paths as persisted in the database.</param>
-	/// <returns>The distinct effective roots to enumerate, ordered by path length ascending.</returns>
 	internal static List<string> ComputeEffectiveRoots(List<string> libraries)
 	{
 		libraries = libraries.OrderBy(f => f.Length).ToList();
@@ -409,14 +344,6 @@ public class LibraryScanner
 		return uniqueFolders;
 	}
 
-	/// <summary>
-	/// Determines whether <paramref name="path"/> is the same folder as <paramref name="parent"/> or lives
-	/// beneath it.
-	/// </summary>
-	/// <remarks>
-	/// The comparison is separator aware, so sibling folders that only share a name prefix
-	/// (e.g. "D:\Music" and "D:\Music2") are not mistaken for nested ones and silently dropped.
-	/// </remarks>
 	private static bool IsSameOrNestedPath(string path, string parent)
 	{
 		var trimmedParent = parent.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
@@ -425,18 +352,6 @@ public class LibraryScanner
 			|| path.StartsWith(trimmedParent + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
 	}
 
-	/// <summary>
-	/// Reads the audio formats configured in Settings and returns the file extensions that are currently
-	/// enabled for scanning.
-	/// </summary>
-	/// <remarks>
-	/// Extensions are stored in lower case with a leading dot, matching the comparison the callers use while
-	/// enumerating files. <c>".mp3"</c> is returned when no format is enabled, so a scan never silently finds
-	/// nothing.
-	/// </remarks>
-	/// <returns>
-	/// A task whose result is the list of enabled file extensions, or a list containing only <c>".mp3"</c>.
-	/// </returns>
 	internal static async Task<List<string>> GetEnabledExtensions()
 	{
 		var formatList = await DatabaseHelper.Instance.GetAllMusicFormats();
@@ -449,11 +364,6 @@ public class LibraryScanner
 		return extensions;
 	}
 
-	/// <summary>
-	/// Counts the distinct folders that directly contain at least one of the given tracks with an enabled
-	/// extension. Used by incremental auto-scan passes, which never walk the library tree and therefore
-	/// cannot recount folders from the file system like a full scan does.
-	/// </summary>
 	internal static int CountFoldersFromPaths(IEnumerable<string> trackedPaths)
 	{
 		var folders = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -466,20 +376,6 @@ public class LibraryScanner
 		return folders.Count;
 	}
 
-	/// <summary>
-	/// Refreshes the persisted scan result values (library count, folder count, songs count and last scan
-	/// time) and stores the situational scan result message. A scan that finished without problems clears
-	/// the message, while the failure paths pass one in ("No libraries found", "No tracks could be added").
-	/// </summary>
-	/// <remarks>
-	/// <paramref name="folderCount"/> is only supplied by full scans, which are the only passes that walk
-	/// the library tree; the incremental auto-scan callers omit it so the last counted value is kept.
-	/// </remarks>
-	/// <param name="folderCount">
-	/// The number of sub folders that directly contain at least one track with an enabled extension,
-	/// or null to keep the previously stored value.
-	/// </param>
-	/// <param name="message">The message describing the scan outcome, or null when the scan succeeded.</param>
 	internal static async Task RefreshAutoScanResultMessage(int? folderCount = null, string? message = null)
 	{
 		var librariesCount = (await DatabaseHelper.Instance.GetAllLibraries()).Count;
@@ -500,26 +396,12 @@ public class LibraryScanner
 			localSettings.Values[nameof(LocalSave.ScanResult_Message)] = message;
 	}
 
-	/// <summary>
-	/// Determines the appropriate player type ("Windows" or "Flyleaf") for a given audio file,
-	/// based on its file extension and codec description.
-	/// </summary>
-	/// <param name="codecDescription">
-	/// The codec description string, typically obtained from TagLib, which provides information about the audio codec.
-	/// </param>
-	/// <param name="filePath">
-	/// The full path to the audio file whose player type is to be determined.
-	/// </param>
-	/// <returns>
-	/// Returns "Windows" if the file is best handled by the Windows-native player, or "Flyleaf" if it requires the Flyleaf player.
-	/// </returns>
 	internal static string DeterminePlayerType(string? codecDescription, string filePath)
 	{
 		var ext = System.IO.Path.GetExtension(filePath).ToLowerInvariant();
 
 		switch (ext)
 		{
-			// Unambiguous Windows-native extensions
 			case ".mp3":
 			case ".mp2":
 			case ".wma":
@@ -530,7 +412,6 @@ public class LibraryScanner
 			case ".rmi":
 				return "Windows";
 
-			// Unambiguous Flyleaf-only extensions
 			case ".ogg":
 			case ".oga":
 			case ".ogx":
@@ -549,12 +430,10 @@ public class LibraryScanner
 				return "Flyleaf";
 		}
 
-		// Ambiguous extensions — resolve using codec description from TagLib
 		if (!string.IsNullOrWhiteSpace(codecDescription))
 		{
 			var codec = codecDescription.ToLowerInvariant();
 
-			// Flyleaf-only codecs
 			if (codec.Contains("apple lossless") ||
 				codec.Contains("alac") ||
 				codec.Contains("opus") ||
@@ -574,7 +453,6 @@ public class LibraryScanner
 				return "Flyleaf";
 			}
 
-			// Windows-native codecs
 			if (codec.Contains("mpeg audio") ||
 				codec.Contains("aac") ||
 				codec.Contains("mpeg-4 audio") ||
@@ -588,7 +466,6 @@ public class LibraryScanner
 			}
 		}
 
-		// No codec info or unrecognized — extension last resort
 		switch (ext)
 		{
 			case ".m4a":
@@ -598,11 +475,9 @@ public class LibraryScanner
 			case ".aac":
 			case ".wav":
 			case ".bwf":
-				// The Duration=0 path above will override to Flyleaf if needed.
 				return "Windows";
 			default:
 				return "Flyleaf";
 		}
 	}
-
 }

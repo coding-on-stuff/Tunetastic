@@ -8,6 +8,11 @@ namespace Tunetastic.Common.Operations;
 /// </summary>
 public static class CliHandler
 {
+	public const int EXIT_SUCCESS = 0;
+	public const int EXIT_PARTIAL_FAILURE = 1;
+	public const int EXIT_INVALID_ARGS = 2;
+	public const int EXIT_IPC_ERROR = 3;
+
 	[DllImport("kernel32.dll", SetLastError = true)]
 	private static extern bool AttachConsole(int dwProcessId);
 
@@ -49,20 +54,23 @@ public static class CliHandler
 	/// <summary>
 	/// Executes CLI logic based on provided command line arguments.
 	/// </summary>
-	public static async Task ExecuteCliAsync(string[] args, TextWriter? writer = null)
+	/// <returns>Exit code integer (0 = success, 1 = partial failure, 2 = invalid arguments or path not found, 3 = IPC communication error).</returns>
+	public static async Task<int> ExecuteCliAsync(string[] args, TextWriter? writer = null)
 	{
 		writer ??= Console.Out;
 
 		if (args == null || args.Length == 0 || IsHelpRequest(args))
 		{
 			PrintUsage(writer);
-			return;
+			Environment.ExitCode = EXIT_SUCCESS;
+			return EXIT_SUCCESS;
 		}
 
 		if (args.Length > 0 && (string.Equals(args[0], "test", StringComparison.OrdinalIgnoreCase) || string.Equals(args[0], "--run-tests", StringComparison.OrdinalIgnoreCase)))
 		{
 			await CliHandlerTests.RunTestsAsync(writer);
-			return;
+			Environment.ExitCode = EXIT_SUCCESS;
+			return EXIT_SUCCESS;
 		}
 
 		// Syntax: tunetastic playlist add "<playlist_name>" "<file_or_folder_or_glob>"
@@ -73,14 +81,16 @@ public static class CliHandler
 			string playlistName = args[2].Trim();
 			string targetPath = args[3].Trim();
 
-			await AddToPlaylistAsync(playlistName, targetPath, writer);
+			int exitCode = await AddToPlaylistAsync(playlistName, targetPath, writer);
+			Environment.ExitCode = exitCode;
+			return exitCode;
 		}
-		else
-		{
-			writer.WriteLine($"Error: Invalid command arguments: '{string.Join(" ", args)}'.");
-			writer.WriteLine();
-			PrintUsage(writer);
-		}
+
+		writer.WriteLine($"Error: Invalid command arguments: '{string.Join(" ", args)}'.");
+		writer.WriteLine();
+		PrintUsage(writer);
+		Environment.ExitCode = EXIT_INVALID_ARGS;
+		return EXIT_INVALID_ARGS;
 	}
 
 	private static bool IsHelpRequest(string[] args)
@@ -124,11 +134,21 @@ public static class CliHandler
 		".mid", ".midi", ".ac3", ".dts", ".mka", ".webm"
 	};
 
-	private static async Task AddToPlaylistAsync(string playlistName, string targetPath, TextWriter writer)
+	private static async Task<int> AddToPlaylistAsync(string playlistName, string targetPath, TextWriter writer)
 	{
+		var extensions = new HashSet<string>(DefaultAudioExtensions, StringComparer.OrdinalIgnoreCase);
+
+		// Resolve files BEFORE initializing database
+		List<string> files = ResolveFiles(targetPath, extensions, writer);
+
+		if (files.Count == 0)
+		{
+			writer.WriteLine($"No audio files found matching path or pattern: '{targetPath}'.");
+			return EXIT_INVALID_ARGS;
+		}
+
 		await DatabaseHelper.Instance.InitializeDatabase();
 
-		var extensions = new HashSet<string>(DefaultAudioExtensions, StringComparer.OrdinalIgnoreCase);
 		try
 		{
 			var enabledExts = await LibraryScanner.GetEnabledExtensions();
@@ -140,14 +160,6 @@ public static class CliHandler
 		catch
 		{
 			// Fallback to default audio extensions
-		}
-
-		List<string> files = ResolveFiles(targetPath, extensions, writer);
-
-		if (files.Count == 0)
-		{
-			writer.WriteLine($"No audio files found matching path or pattern: '{targetPath}'.");
-			return;
 		}
 
 		// Ensure target playlist exists or create it
@@ -168,7 +180,6 @@ public static class CliHandler
 
 		int addedCount = 0;
 		int skippedCount = 0;
-		int warningCount = 0;
 		int failedCount = 0;
 
 		List<Song> songsToSave = new();
@@ -181,79 +192,64 @@ public static class CliHandler
 
 			try
 			{
-				TagLib.File? tagFile = null;
-				try
+				var (song, succeeded, discNumber, composers, hasPictures) = await LibraryScanner.ExtractSongMetadata(filePath, 0);
+
+				if (!succeeded)
 				{
-					tagFile = TagLib.File.Create(filePath);
+					writer.WriteLine("  [Failed] Could not parse metadata or audio tags from file.");
+					failedCount++;
+					writer.WriteLine();
+					continue;
 				}
-				catch
+
+				// Check metadata fields extracted
+				writer.WriteLine($"  Title: {song.Title}");
+				writer.WriteLine($"  Artist: {song.Artists}");
+				writer.WriteLine($"  Album: {song.Album}");
+				writer.WriteLine($"  Year: {song.Year}");
+				writer.WriteLine($"  Genre: {song.Genre}");
+				if (song.Track.HasValue && song.Track > 0)
 				{
-					// TagLib file creation failure handled gracefully
+					writer.WriteLine($"  Track Number: {song.Track}");
 				}
 
-				using (tagFile)
+				if (discNumber > 0)
 				{
-					var (song, succeeded) = await LibraryScanner.ExtractSongMetadata(filePath, 0);
+					writer.WriteLine($"  [Limitation] Disc number ({discNumber}) present in file tag, but not supported by Tunetastic schema.");
+				}
+				if (composers != null && composers.Length > 0)
+				{
+					string composersStr = string.Join(", ", composers);
+					writer.WriteLine($"  [Limitation] Composer tag ({composersStr}) present in file tag, but not supported by Tunetastic schema.");
+				}
 
-					if (!succeeded)
-					{
-						writer.WriteLine("  [Warning] Unable to parse full ID3 tags from file; basic fallback metadata generated.");
-						warningCount++;
-					}
+				// Check cover art
+				bool hasCover = !string.IsNullOrEmpty(song.Cover) && File.Exists(song.Cover) && !song.Cover.EndsWith("AppIcon.png", StringComparison.OrdinalIgnoreCase);
+				if (hasCover)
+				{
+					writer.WriteLine("  Cover Art: Embedded cover art successfully extracted.");
+				}
+				else if (hasPictures)
+				{
+					writer.WriteLine("  [Limitation] Embedded artwork present in file, but picture format could not be decoded.");
+				}
+				else
+				{
+					writer.WriteLine("  Cover Art: None embedded.");
+				}
 
-					// Check metadata fields extracted
-					writer.WriteLine($"  Title: {song.Title}");
-					writer.WriteLine($"  Artist: {song.Artists}");
-					writer.WriteLine($"  Album: {song.Album}");
-					writer.WriteLine($"  Year: {song.Year}");
-					writer.WriteLine($"  Genre: {song.Genre}");
-					if (song.Track.HasValue && song.Track > 0)
-					{
-						writer.WriteLine($"  Track Number: {song.Track}");
-					}
-
-					// Check TagLib for fields or limitations
-					if (tagFile != null)
-					{
-						if (tagFile.Tag.Disc > 0)
-						{
-							writer.WriteLine($"  [Limitation] Disc number ({tagFile.Tag.Disc}) present in file tag, but not supported by Tunetastic schema.");
-						}
-						if (tagFile.Tag.Composers != null && tagFile.Tag.Composers.Length > 0)
-						{
-							string composersStr = string.Join(", ", tagFile.Tag.Composers);
-							writer.WriteLine($"  [Limitation] Composer tag ({composersStr}) present in file tag, but not supported by Tunetastic schema.");
-						}
-					}
-
-					// Check cover art
-					bool hasCover = !string.IsNullOrEmpty(song.Cover) && File.Exists(song.Cover) && !song.Cover.EndsWith("AppIcon.png", StringComparison.OrdinalIgnoreCase);
-					if (hasCover)
-					{
-						writer.WriteLine("  Cover Art: Embedded cover art successfully extracted.");
-					}
-					else if (tagFile?.Tag.Pictures != null && tagFile.Tag.Pictures.Length > 0)
-					{
-						writer.WriteLine("  [Limitation] Embedded artwork present in file, but picture format could not be decoded.");
-					}
-					else
-					{
-						writer.WriteLine("  Cover Art: None embedded.");
-					}
-
-					if (existingSongPaths.Contains(filePath))
-					{
-						writer.WriteLine($"  Status: Skipped (already in playlist '{targetPlaylist}').");
-						skippedCount++;
-					}
-					else
-					{
-						songsToSave.Add(song);
-						songsToAddToPlaylist.Add(filePath);
-						existingSongPaths.Add(filePath);
-						writer.WriteLine("  Status: Added.");
-						addedCount++;
-					}
+				if (existingSongPaths.Contains(filePath))
+				{
+					writer.WriteLine($"  Status: Skipped (already in playlist '{targetPlaylist}').");
+					skippedCount++;
+				}
+				else
+				{
+					songsToSave.Add(song);
+					songsToAddToPlaylist.Add(filePath);
+					existingSongPaths.Add(filePath);
+					writer.WriteLine("  Status: Added.");
+					addedCount++;
 				}
 			}
 			catch (Exception ex)
@@ -280,15 +276,13 @@ public static class CliHandler
 		writer.WriteLine($"  - Total files processed: {files.Count}");
 		writer.WriteLine($"  - Successfully added: {addedCount}");
 		writer.WriteLine($"  - Skipped (already in playlist): {skippedCount}");
-		if (warningCount > 0)
-		{
-			writer.WriteLine($"  - Warnings (fallback metadata used): {warningCount}");
-		}
 		if (failedCount > 0)
 		{
 			writer.WriteLine($"  - Failed (unreadable/corrupt): {failedCount}");
 		}
 		writer.WriteLine("========================================");
+
+		return failedCount > 0 ? EXIT_PARTIAL_FAILURE : EXIT_SUCCESS;
 	}
 
 	/// <summary>
@@ -317,7 +311,8 @@ public static class CliHandler
 		// Case 2: Direct directory
 		if (Directory.Exists(targetPath))
 		{
-			var files = Directory.EnumerateFiles(targetPath, "*.*", SearchOption.AllDirectories)
+			var options = new EnumerationOptions { RecurseSubdirectories = true, IgnoreInaccessible = true, MatchCasing = MatchCasing.CaseInsensitive };
+			var files = Directory.EnumerateFiles(targetPath, "*.*", options)
 								 .Where(f => audioExtensions.Contains(Path.GetExtension(f)));
 			result.AddRange(files.Select(Path.GetFullPath));
 			return result;
@@ -328,20 +323,27 @@ public static class CliHandler
 		{
 			try
 			{
-				string? dir = Path.GetDirectoryName(targetPath);
-				string pattern = Path.GetFileName(targetPath);
-
-				bool isRecursive = targetPath.Contains("**");
-				SearchOption searchOption = isRecursive ? SearchOption.AllDirectories : SearchOption.TopDirectoryOnly;
+				int wildcardIdx = targetPath.IndexOfAny(new[] { '*', '?' });
+				string pathBeforeWildcard = targetPath.Substring(0, wildcardIdx);
+				string? dir = Path.GetDirectoryName(pathBeforeWildcard);
 
 				if (string.IsNullOrEmpty(dir))
 				{
 					dir = Directory.GetCurrentDirectory();
 				}
 
+				string pattern = Path.GetFileName(targetPath);
+				if (pattern.Contains("**"))
+				{
+					pattern = pattern.Replace("**", "*");
+				}
+
+				bool isRecursive = targetPath.Contains("**");
+				var options = new EnumerationOptions { RecurseSubdirectories = isRecursive, IgnoreInaccessible = true, MatchCasing = MatchCasing.CaseInsensitive };
+
 				if (Directory.Exists(dir))
 				{
-					var files = Directory.EnumerateFiles(dir, pattern, searchOption)
+					var files = Directory.EnumerateFiles(dir, pattern, options)
 										 .Where(f => audioExtensions.Contains(Path.GetExtension(f)));
 					result.AddRange(files.Select(Path.GetFullPath));
 					return result;

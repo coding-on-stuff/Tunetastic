@@ -13,12 +13,6 @@ public static class Startup
 	/// The main entry point for the Tunetastic application that enforces single instance behavior.
 	/// </summary>
 	/// <param name="args">Command-line arguments passed to the application.</param>
-	/// <remarks>
-	/// Uses a mutex to prevent multiple instances from running simultaneously.
-	/// If an existing instance is detected, it attempts to communicate with it via a named pipe
-	/// by sending a PING or CLI message before terminating the current instance.
-	/// If no existing instance is found, it proceeds to execute CLI logic or start a new application instance.
-	/// </remarks>
 	[STAThread]
 	static void Main(string[] args)
 	{
@@ -32,15 +26,15 @@ public static class Startup
 
 		if (!createdNew)
 		{
-			try
+			if (CliHandler.IsCliCommand(args))
 			{
-				using var client = new NamedPipeClientStream(".", "Tunetastic.InstancePing", PipeDirection.InOut);
-				client.Connect(1000);
-				using var writer = new StreamWriter(client) { AutoFlush = true };
-				using var reader = new StreamReader(client);
-
-				if (CliHandler.IsCliCommand(args))
+				try
 				{
+					using var client = new NamedPipeClientStream(".", "Tunetastic.InstancePing", PipeDirection.InOut);
+					client.Connect(1500);
+					using var writer = new StreamWriter(client) { AutoFlush = true };
+					using var reader = new StreamReader(client);
+
 					var jsonPayload = JsonSerializer.Serialize(args);
 					writer.WriteLine("CLI:" + jsonPayload);
 					string? line;
@@ -49,25 +43,35 @@ public static class Startup
 						if (line == "END_CLI") break;
 						Console.WriteLine(line);
 					}
+					Environment.ExitCode = CliHandler.EXIT_SUCCESS;
 				}
-				else
+				catch (Exception ex)
 				{
-					writer.WriteLine("PING");
+					Console.Error.WriteLine($"Error: Failed to communicate with running Tunetastic instance: {ex.Message}");
+					Environment.ExitCode = CliHandler.EXIT_IPC_ERROR;
 				}
 			}
-			catch
+			else
 			{
-				//ignore
+				try
+				{
+					using var client = new NamedPipeClientStream(".", "Tunetastic.InstancePing", PipeDirection.InOut);
+					client.Connect(500);
+					using var writer = new StreamWriter(client) { AutoFlush = true };
+					writer.WriteLine("PING");
+				}
+				catch
+				{
+					// ignore
+				}
 			}
 			return;
 		}
 
 		if (CliHandler.IsCliCommand(args))
 		{
-			Task.Run(async () =>
-			{
-				await CliHandler.ExecuteCliAsync(args);
-			}).GetAwaiter().GetResult();
+			int exitCode = Task.Run(async () => await CliHandler.ExecuteCliAsync(args)).GetAwaiter().GetResult();
+			Environment.ExitCode = exitCode;
 			return;
 		}
 

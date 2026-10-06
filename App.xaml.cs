@@ -194,17 +194,26 @@ public partial class App : Application
 					if (message != null && message.StartsWith("CLI:"))
 					{
 						var jsonPayload = message.Substring(4);
-						string[] cliArgs;
+						string[]? cliArgs = null;
 						try
 						{
-							cliArgs = System.Text.Json.JsonSerializer.Deserialize<string[]>(jsonPayload) ?? Array.Empty<string>();
+							cliArgs = System.Text.Json.JsonSerializer.Deserialize<string[]>(jsonPayload);
 						}
 						catch
 						{
-							cliArgs = Array.Empty<string>();
+							// Malformed JSON payload
 						}
-						await CliHandler.ExecuteCliAsync(cliArgs, writer);
-						writer.WriteLine("END_CLI");
+
+						if (cliArgs == null)
+						{
+							writer.WriteLine("Error: Invalid CLI payload received.");
+							writer.WriteLine("END_CLI");
+						}
+						else
+						{
+							await CliHandler.ExecuteCliAsync(cliArgs, writer);
+							writer.WriteLine("END_CLI");
+						}
 					}
 					else if (message == "PING" && MainWindow is not null)
 					{

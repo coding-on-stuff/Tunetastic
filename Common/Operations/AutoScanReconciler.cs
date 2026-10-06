@@ -1,4 +1,4 @@
-﻿using System.Collections.Concurrent;
+using System.Collections.Concurrent;
 
 namespace Tunetastic.Common.Operations;
 
@@ -38,7 +38,7 @@ public static class AutoScanReconciler
 		var effectiveRoots = LibraryScanner.ComputeEffectiveRoots(libraries);
 		var extensions = await LibraryScanner.GetEnabledExtensions();
 
-		var options = new EnumerationOptions { RecurseSubdirectories = true };
+		var options = new EnumerationOptions { RecurseSubdirectories = true, IgnoreInaccessible = true };
 		var onDisk = new Dictionary<string, (long FileSizeBytes, long LastModifiedUtc, long CreationTimeUtc)>(StringComparer.OrdinalIgnoreCase);
 
 		foreach (var folder in effectiveRoots)
@@ -155,7 +155,7 @@ public static class AutoScanReconciler
 
 		await Parallel.ForEachAsync(allPaths, async (filePath, ct) =>
 		{
-			var (song, succeeded) = await LibraryScanner.ExtractSongMetadata(filePath, ignoreTrackDuration);
+			var (song, succeeded, _, _, _) = await LibraryScanner.ExtractSongMetadata(filePath, ignoreTrackDuration);
 			if (!succeeded) return;
 
 			if (song.Duration <= ignoreTrackDuration)

@@ -191,68 +191,69 @@ public static class CliHandler
 					// TagLib file creation failure handled gracefully
 				}
 
-				var (song, succeeded) = await LibraryScanner.ExtractSongMetadata(filePath, 0);
-
-				if (!succeeded)
+				using (tagFile)
 				{
-					writer.WriteLine("  [Warning] Unable to parse full ID3 tags from file; basic fallback metadata generated.");
-					warningCount++;
-				}
+					var (song, succeeded) = await LibraryScanner.ExtractSongMetadata(filePath, 0);
 
-				// Check metadata fields extracted
-				writer.WriteLine($"  Title: {song.Title}");
-				writer.WriteLine($"  Artist: {song.Artists}");
-				writer.WriteLine($"  Album: {song.Album}");
-				writer.WriteLine($"  Year: {song.Year}");
-				writer.WriteLine($"  Genre: {song.Genre}");
-				if (song.Track.HasValue && song.Track > 0)
-				{
-					writer.WriteLine($"  Track Number: {song.Track}");
-				}
-
-				// Check TagLib for fields or limitations
-				if (tagFile != null)
-				{
-					if (tagFile.Tag.Disc > 0)
+					if (!succeeded)
 					{
-						writer.WriteLine($"  [Limitation] Disc number ({tagFile.Tag.Disc}) present in file tag, but not supported by Tunetastic schema.");
+						writer.WriteLine("  [Warning] Unable to parse full ID3 tags from file; basic fallback metadata generated.");
+						warningCount++;
 					}
-					if (tagFile.Tag.Composers != null && tagFile.Tag.Composers.Length > 0)
+
+					// Check metadata fields extracted
+					writer.WriteLine($"  Title: {song.Title}");
+					writer.WriteLine($"  Artist: {song.Artists}");
+					writer.WriteLine($"  Album: {song.Album}");
+					writer.WriteLine($"  Year: {song.Year}");
+					writer.WriteLine($"  Genre: {song.Genre}");
+					if (song.Track.HasValue && song.Track > 0)
 					{
-						string composersStr = string.Join(", ", tagFile.Tag.Composers);
-						writer.WriteLine($"  [Limitation] Composer tag ({composersStr}) present in file tag, but not supported by Tunetastic schema.");
+						writer.WriteLine($"  Track Number: {song.Track}");
 					}
-				}
 
-				// Check cover art
-				bool hasCover = !string.IsNullOrEmpty(song.Cover) && File.Exists(song.Cover) && !song.Cover.EndsWith("AppIcon.png", StringComparison.OrdinalIgnoreCase);
-				if (hasCover)
-				{
-					writer.WriteLine("  Cover Art: Embedded cover art successfully extracted.");
-				}
-				else if (tagFile?.Tag.Pictures != null && tagFile.Tag.Pictures.Length > 0)
-				{
-					writer.WriteLine("  [Limitation] Embedded artwork present in file, but picture format could not be decoded.");
-				}
-				else
-				{
-					writer.WriteLine("  Cover Art: None embedded.");
-				}
+					// Check TagLib for fields or limitations
+					if (tagFile != null)
+					{
+						if (tagFile.Tag.Disc > 0)
+						{
+							writer.WriteLine($"  [Limitation] Disc number ({tagFile.Tag.Disc}) present in file tag, but not supported by Tunetastic schema.");
+						}
+						if (tagFile.Tag.Composers != null && tagFile.Tag.Composers.Length > 0)
+						{
+							string composersStr = string.Join(", ", tagFile.Tag.Composers);
+							writer.WriteLine($"  [Limitation] Composer tag ({composersStr}) present in file tag, but not supported by Tunetastic schema.");
+						}
+					}
 
-				tagFile?.Dispose();
+					// Check cover art
+					bool hasCover = !string.IsNullOrEmpty(song.Cover) && File.Exists(song.Cover) && !song.Cover.EndsWith("AppIcon.png", StringComparison.OrdinalIgnoreCase);
+					if (hasCover)
+					{
+						writer.WriteLine("  Cover Art: Embedded cover art successfully extracted.");
+					}
+					else if (tagFile?.Tag.Pictures != null && tagFile.Tag.Pictures.Length > 0)
+					{
+						writer.WriteLine("  [Limitation] Embedded artwork present in file, but picture format could not be decoded.");
+					}
+					else
+					{
+						writer.WriteLine("  Cover Art: None embedded.");
+					}
 
-				if (existingSongPaths.Contains(filePath))
-				{
-					writer.WriteLine($"  Status: Skipped (already in playlist '{targetPlaylist}').");
-					skippedCount++;
-				}
-				else
-				{
-					songsToSave.Add(song);
-					songsToAddToPlaylist.Add(filePath);
-					existingSongPaths.Add(filePath);
-					writer.WriteLine("  Status: Added.");
-					addedCount++;
+					if (existingSongPaths.Contains(filePath))
+					{
+						writer.WriteLine($"  Status: Skipped (already in playlist '{targetPlaylist}').");
+						skippedCount++;
+					}
+					else
+					{
+						songsToSave.Add(song);
+						songsToAddToPlaylist.Add(filePath);
+						existingSongPaths.Add(filePath);
+						writer.WriteLine("  Status: Added.");
+						addedCount++;
+					}
 				}
 			}
 			catch (Exception ex)

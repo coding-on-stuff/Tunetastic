@@ -11,11 +11,7 @@ public static class CliHandler
 	[DllImport("kernel32.dll", SetLastError = true)]
 	private static extern bool AttachConsole(int dwProcessId);
 
-	[DllImport("kernel32.dll", SetLastError = true)]
-	private static extern IntPtr GetStdHandle(int nStdHandle);
-
 	private const int ATTACH_PARENT_PROCESS = -1;
-	private const int STD_OUTPUT_HANDLE = -11;
 
 	/// <summary>
 	/// Attaches the process to the parent console window if invoked from a terminal,
@@ -27,15 +23,10 @@ public static class CliHandler
 		{
 			if (AttachConsole(ATTACH_PARENT_PROCESS))
 			{
-				var stdHandle = GetStdHandle(STD_OUTPUT_HANDLE);
-				if (stdHandle != IntPtr.Zero)
-				{
-					var safeHandle = new Microsoft.Win32.SafeHandles.SafeFileHandle(stdHandle, false);
-					var stream = new FileStream(safeHandle, FileAccess.Write);
-					var writer = new StreamWriter(stream, Console.OutputEncoding) { AutoFlush = true };
-					Console.SetOut(writer);
-					Console.SetError(writer);
-				}
+				Stream stdout = Console.OpenStandardOutput();
+				Stream stderr = Console.OpenStandardError();
+				Console.SetOut(new StreamWriter(stdout, Console.OutputEncoding) { AutoFlush = true });
+				Console.SetError(new StreamWriter(stderr, Console.OutputEncoding) { AutoFlush = true });
 			}
 		}
 		catch
@@ -106,11 +97,16 @@ public static class CliHandler
 		writer.WriteLine("  tunetastic playlist add \"My Playlist\" \"C:\\Music\\*.mp3\"");
 		writer.WriteLine("  tunetastic playlist add \"My Playlist\" \"C:\\Music\\Album\"");
 		writer.WriteLine();
+		writer.WriteLine("Notes:");
+		writer.WriteLine("  - Folder paths are scanned recursively for all supported audio formats.");
+		writer.WriteLine("  - Wildcard patterns (e.g. *.mp3) match files in the specified folder.");
+		writer.WriteLine("  - Tracks already in the target playlist are skipped automatically.");
+		writer.WriteLine();
 		writer.WriteLine("Options:");
 		writer.WriteLine("  --help, -h    Display this help message.");
 	}
 
-	private static readonly HashSet<string> DefaultAudioExtensions = new(StringComparer.OrdinalIgnoreCase)
+	public static readonly HashSet<string> DefaultAudioExtensions = new(StringComparer.OrdinalIgnoreCase)
 	{
 		".mp3", ".flac", ".m4a", ".aac", ".wav", ".wma", ".ogg", ".opus",
 		".ape", ".wv", ".tta", ".mp2", ".m4b", ".m4r", ".mp4", ".bwf",
@@ -161,7 +157,8 @@ public static class CliHandler
 
 		int addedCount = 0;
 		int skippedCount = 0;
-		int errorCount = 0;
+		int warningCount = 0;
+		int failedCount = 0;
 
 		List<Song> songsToSave = new();
 		List<string> songsToAddToPlaylist = new();
@@ -171,79 +168,86 @@ public static class CliHandler
 			string fileName = Path.GetFileName(filePath);
 			writer.WriteLine($"File: {fileName}");
 
-			TagLib.File? tagFile = null;
 			try
 			{
-				tagFile = TagLib.File.Create(filePath);
-			}
-			catch
-			{
-				// TagLib reading error
-			}
-
-			var (song, succeeded) = await LibraryScanner.ExtractSongMetadata(filePath, 0);
-
-			if (!succeeded)
-			{
-				writer.WriteLine("  [Warning] Unable to parse full ID3 tags from file; basic fallback metadata generated.");
-				errorCount++;
-			}
-
-			// Check metadata fields extracted
-			writer.WriteLine($"  Title: {song.Title}");
-			writer.WriteLine($"  Artist: {song.Artists}");
-			writer.WriteLine($"  Album: {song.Album}");
-			writer.WriteLine($"  Year: {song.Year}");
-			writer.WriteLine($"  Genre: {song.Genre}");
-			if (song.Track.HasValue && song.Track > 0)
-			{
-				writer.WriteLine($"  Track Number: {song.Track}");
-			}
-
-			// Check TagLib for fields or limitations
-			if (tagFile != null)
-			{
-				if (tagFile.Tag.Disc > 0)
+				TagLib.File? tagFile = null;
+				try
 				{
-					writer.WriteLine($"  [Limitation] Disc number ({tagFile.Tag.Disc}) present in file tag, but not supported by Tunetastic schema.");
+					tagFile = TagLib.File.Create(filePath);
 				}
-				if (tagFile.Tag.Composers != null && tagFile.Tag.Composers.Length > 0)
+				catch
 				{
-					string composersStr = string.Join(", ", tagFile.Tag.Composers);
-					writer.WriteLine($"  [Limitation] Composer tag ({composersStr}) present in file tag, but not supported by Tunetastic schema.");
+					// TagLib file creation failure handled gracefully
+				}
+
+				var (song, succeeded) = await LibraryScanner.ExtractSongMetadata(filePath, 0);
+
+				if (!succeeded)
+				{
+					writer.WriteLine("  [Warning] Unable to parse full ID3 tags from file; basic fallback metadata generated.");
+					warningCount++;
+				}
+
+				// Check metadata fields extracted
+				writer.WriteLine($"  Title: {song.Title}");
+				writer.WriteLine($"  Artist: {song.Artists}");
+				writer.WriteLine($"  Album: {song.Album}");
+				writer.WriteLine($"  Year: {song.Year}");
+				writer.WriteLine($"  Genre: {song.Genre}");
+				if (song.Track.HasValue && song.Track > 0)
+				{
+					writer.WriteLine($"  Track Number: {song.Track}");
+				}
+
+				// Check TagLib for fields or limitations
+				if (tagFile != null)
+				{
+					if (tagFile.Tag.Disc > 0)
+					{
+						writer.WriteLine($"  [Limitation] Disc number ({tagFile.Tag.Disc}) present in file tag, but not supported by Tunetastic schema.");
+					}
+					if (tagFile.Tag.Composers != null && tagFile.Tag.Composers.Length > 0)
+					{
+						string composersStr = string.Join(", ", tagFile.Tag.Composers);
+						writer.WriteLine($"  [Limitation] Composer tag ({composersStr}) present in file tag, but not supported by Tunetastic schema.");
+					}
+				}
+
+				// Check cover art
+				bool hasCover = !string.IsNullOrEmpty(song.Cover) && File.Exists(song.Cover) && !song.Cover.EndsWith("AppIcon.png", StringComparison.OrdinalIgnoreCase);
+				if (hasCover)
+				{
+					writer.WriteLine("  Cover Art: Embedded cover art successfully extracted.");
+				}
+				else if (tagFile?.Tag.Pictures != null && tagFile.Tag.Pictures.Length > 0)
+				{
+					writer.WriteLine("  [Limitation] Embedded artwork present in file, but picture format could not be decoded.");
+				}
+				else
+				{
+					writer.WriteLine("  Cover Art: None embedded.");
+				}
+
+				tagFile?.Dispose();
+
+				if (existingSongPaths.Contains(filePath))
+				{
+					writer.WriteLine($"  Status: Skipped (already in playlist '{targetPlaylist}').");
+					skippedCount++;
+				}
+				else
+				{
+					songsToSave.Add(song);
+					songsToAddToPlaylist.Add(filePath);
+					existingSongPaths.Add(filePath);
+					writer.WriteLine("  Status: Added.");
+					addedCount++;
 				}
 			}
-
-			// Check cover art
-			bool hasCover = !string.IsNullOrEmpty(song.Cover) && File.Exists(song.Cover) && !song.Cover.EndsWith("AppIcon.png", StringComparison.OrdinalIgnoreCase);
-			if (hasCover)
+			catch (Exception ex)
 			{
-				writer.WriteLine("  Cover Art: Embedded cover art successfully extracted.");
-			}
-			else if (tagFile?.Tag.Pictures != null && tagFile.Tag.Pictures.Length > 0)
-			{
-				writer.WriteLine("  [Limitation] Embedded artwork present in file, but picture format could not be decoded.");
-			}
-			else
-			{
-				writer.WriteLine("  Cover Art: None embedded.");
-			}
-
-			tagFile?.Dispose();
-
-			songsToSave.Add(song);
-
-			if (existingSongPaths.Contains(filePath))
-			{
-				writer.WriteLine($"  Status: Skipped (already in playlist '{targetPlaylist}').");
-				skippedCount++;
-			}
-			else
-			{
-				songsToAddToPlaylist.Add(filePath);
-				existingSongPaths.Add(filePath);
-				writer.WriteLine("  Status: Added.");
-				addedCount++;
+				writer.WriteLine($"  [Failed] Error processing file '{fileName}': {ex.Message}");
+				failedCount++;
 			}
 
 			writer.WriteLine();
@@ -264,15 +268,23 @@ public static class CliHandler
 		writer.WriteLine($"  - Total files processed: {files.Count}");
 		writer.WriteLine($"  - Successfully added: {addedCount}");
 		writer.WriteLine($"  - Skipped (already in playlist): {skippedCount}");
-		if (errorCount > 0)
+		if (warningCount > 0)
 		{
-			writer.WriteLine($"  - Warnings/Errors: {errorCount}");
+			writer.WriteLine($"  - Warnings (fallback metadata used): {warningCount}");
+		}
+		if (failedCount > 0)
+		{
+			writer.WriteLine($"  - Failed (unreadable/corrupt): {failedCount}");
 		}
 		writer.WriteLine("========================================");
 	}
 
-	private static List<string> ResolveFiles(string targetPath, HashSet<string> audioExtensions, TextWriter writer)
+	/// <summary>
+	/// Resolves file paths from a target path, folder, or wildcard pattern.
+	/// </summary>
+	public static List<string> ResolveFiles(string targetPath, HashSet<string>? audioExtensions = null, TextWriter? writer = null)
 	{
+		audioExtensions ??= DefaultAudioExtensions;
 		List<string> result = new();
 
 		// Case 1: Direct file
@@ -299,6 +311,9 @@ public static class CliHandler
 				string? dir = Path.GetDirectoryName(targetPath);
 				string pattern = Path.GetFileName(targetPath);
 
+				bool isRecursive = targetPath.Contains("**");
+				SearchOption searchOption = isRecursive ? SearchOption.AllDirectories : SearchOption.TopDirectoryOnly;
+
 				if (string.IsNullOrEmpty(dir))
 				{
 					dir = Directory.GetCurrentDirectory();
@@ -306,24 +321,24 @@ public static class CliHandler
 
 				if (Directory.Exists(dir))
 				{
-					var files = Directory.EnumerateFiles(dir, pattern, SearchOption.AllDirectories)
+					var files = Directory.EnumerateFiles(dir, pattern, searchOption)
 										 .Where(f => audioExtensions.Contains(Path.GetExtension(f)));
 					result.AddRange(files.Select(Path.GetFullPath));
 					return result;
 				}
 				else
 				{
-					writer.WriteLine($"Directory '{dir}' for wildcard search does not exist.");
+					writer?.WriteLine($"Directory '{dir}' for wildcard search does not exist.");
 				}
 			}
 			catch (Exception ex)
 			{
-				writer.WriteLine($"Error resolving wildcard path '{targetPath}': {ex.Message}");
+				writer?.WriteLine($"Error resolving wildcard path '{targetPath}': {ex.Message}");
 			}
 		}
 		else
 		{
-			writer.WriteLine($"Specified file or folder path does not exist: '{targetPath}'.");
+			writer?.WriteLine($"Specified file or folder path does not exist: '{targetPath}'.");
 		}
 
 		return result;

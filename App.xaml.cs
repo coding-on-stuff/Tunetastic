@@ -193,7 +193,8 @@ public partial class App : Application
 
 					if (message != null && message.StartsWith("CLI:"))
 					{
-						var cliArgs = message.Substring(4).Split(new[] { "|||" }, StringSplitOptions.None);
+						var jsonPayload = message.Substring(4);
+						var cliArgs = System.Text.Json.JsonSerializer.Deserialize<string[]>(jsonPayload) ?? Array.Empty<string>();
 						await CliHandler.ExecuteCliAsync(cliArgs, writer);
 						writer.WriteLine("END_CLI");
 					}

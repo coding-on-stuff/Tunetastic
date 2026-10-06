@@ -1,4 +1,5 @@
-﻿using System.IO.Pipes;
+using System.IO.Pipes;
+using System.Text.Json;
 using Tunetastic.Common.Operations;
 
 namespace Tunetastic;
@@ -40,7 +41,8 @@ public static class Startup
 
 				if (CliHandler.IsCliCommand(args))
 				{
-					writer.WriteLine("CLI:" + string.Join("|||", args));
+					var jsonPayload = JsonSerializer.Serialize(args);
+					writer.WriteLine("CLI:" + jsonPayload);
 					string? line;
 					while ((line = reader.ReadLine()) != null)
 					{

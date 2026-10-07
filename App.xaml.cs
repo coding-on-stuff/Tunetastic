@@ -1,4 +1,5 @@
 ﻿using System.IO.Pipes;
+using Tunetastic.Common.Operations;
 using WinUIEx;
 
 namespace Tunetastic;
@@ -183,13 +184,38 @@ public partial class App : Application
 			{
 				try
 				{
-					using var server = new NamedPipeServerStream("Tunetastic.InstancePing", PipeDirection.In);
+					using var server = new NamedPipeServerStream("Tunetastic.InstancePing", PipeDirection.InOut);
 					await server.WaitForConnectionAsync().ConfigureAwait(false);
 
 					using var reader = new StreamReader(server);
+					using var writer = new StreamWriter(server) { AutoFlush = true };
 					var message = await reader.ReadLineAsync().ConfigureAwait(false);
 
-					if (message == "PING" && MainWindow is not null)
+					if (message != null && message.StartsWith("CLI:"))
+					{
+						var jsonPayload = message.Substring(4);
+						string[]? cliArgs = null;
+						try
+						{
+							cliArgs = System.Text.Json.JsonSerializer.Deserialize<string[]>(jsonPayload);
+						}
+						catch
+						{
+							// Malformed JSON payload
+						}
+
+						if (cliArgs == null)
+						{
+							writer.WriteLine("Error: Invalid CLI payload received.");
+							writer.WriteLine("END_CLI");
+						}
+						else
+						{
+							await CliHandler.ExecuteCliAsync(cliArgs, writer);
+							writer.WriteLine("END_CLI");
+						}
+					}
+					else if (message == "PING" && MainWindow is not null)
 					{
 						MainWindow.DispatcherQueue.TryEnqueue(() =>
 						{
